@@ -15,6 +15,7 @@ const (
 	model          = "claude-opus-5-5"
 	maxTokens      = 16000
 	requestTimeout = 5 * time.Minute
+	systemPrompt   = "You are trubo, a coding assistant running in a terminal. Be concise."
 )
 
 func main() {
@@ -26,23 +27,36 @@ func main() {
 	client := anthropic.NewClient()
 	scanner := bufio.NewScanner(os.Stdin)
 
+	// The whole conversation. Since the model has no memory of its own, every
+	// request sends this entire list, and we append to it after each turn.
+	var history []anthropic.MessageParam
+
 	fmt.Print("> ")
 	for scanner.Scan() {
 		input := strings.TrimSpace(scanner.Text())
 
-		if input == "/exit" {
+		switch input {
+		case "/exit":
 			return
-		}
-		if input == "" {
+		case "/clear":
+			history = nil
+			fmt.Println("(conversation cleared)")
+			fmt.Print("> ")
+			continue
+		case "":
 			fmt.Print("> ")
 			continue
 		}
 
-		reply, err := ask(client, input)
+		history = append(history, anthropic.NewUserMessage(anthropic.NewTextBlock(input)))
+
+		resp, err := ask(client, history)
 		if err != nil {
+			history = history[:len(history)-1]
 			fmt.Fprintln(os.Stderr, "Request failed:", err)
 		} else {
-			fmt.Println("trubo:", reply)
+			history = append(history, resp.ToParam())
+			fmt.Println("trubo:", replyText(resp))
 		}
 		fmt.Print("> ")
 	}
@@ -53,26 +67,25 @@ func main() {
 	}
 }
 
-func ask(client anthropic.Client, input string) (string, error) {
+// ask sends the full conversation to the model and returns its response.
+func ask(client anthropic.Client, history []anthropic.MessageParam) (*anthropic.Message, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
 
-	resp, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+	return client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     model,
 		MaxTokens: maxTokens,
-		Messages: []anthropic.MessageParam{
-			anthropic.NewUserMessage(anthropic.NewTextBlock(input)),
-		},
+		System:    []anthropic.TextBlockParam{{Text: systemPrompt}},
+		Messages:  history,
 	})
-	if err != nil {
-		return "", err
-	}
+}
 
+func replyText(resp *anthropic.Message) string {
 	var reply strings.Builder
 	for _, block := range resp.Content {
 		if text, ok := block.AsAny().(anthropic.TextBlock); ok {
 			reply.WriteString(text.Text)
 		}
 	}
-	return reply.String(), nil
+	return reply.String()
 }
