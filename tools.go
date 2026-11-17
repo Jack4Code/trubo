@@ -106,6 +106,29 @@ var tools = []anthropic.ToolUnionParam{
 			Required: []string{"path", "content"},
 		},
 	}},
+	{OfTool: &anthropic.ToolParam{
+		Name: "bash",
+		Description: anthropic.String("Run a shell command with bash -c in the project root and return " +
+			"its combined stdout and stderr and its exit code. Use it to build, test, vet, and run " +
+			"programs. A non-zero exit or a timeout is reported as an error. The command can't read " +
+			"input, so don't run anything interactive. Processes started in the background are " +
+			"killed when the command finishes, so a server must be started and used within the " +
+			"same command. Output longer than about 30KB keeps only the " +
+			"beginning and the end. The user sees the command and must approve it before it runs."),
+		InputSchema: anthropic.ToolInputSchemaParam{
+			Properties: map[string]any{
+				"command": map[string]any{
+					"type":        "string",
+					"description": "The command to run.",
+				},
+				"timeout_seconds": map[string]any{
+					"type":        "integer",
+					"description": "Kill the command after this many seconds. Defaults to 120; the maximum is 600.",
+				},
+			},
+			Required: []string{"command"},
+		},
+	}},
 }
 
 // dispatch runs the tool the model asked for. A tool request is just data:
@@ -124,6 +147,8 @@ func dispatch(name string, input json.RawMessage, confirm confirmFunc) (string, 
 		return editFile(input, confirm)
 	case "write_file":
 		return writeFile(input, confirm)
+	case "bash":
+		return runBash(input, confirm)
 	default:
 		return "", fmt.Errorf("unknown tool %q", name)
 	}

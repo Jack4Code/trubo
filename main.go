@@ -25,8 +25,9 @@ const (
 	// specific project belongs in that project's TRUBO.md.
 	toolsPrompt = "Use list_files and read_file to look at the code instead of guessing. " +
 		"Use edit_file to change existing files and write_file only for new files or full " +
-		"rewrites. The user approves every change. You can't run commands yet, so when a change " +
-		"needs checking (building, running tests), ask the user to do it."
+		"rewrites. Use bash to run commands, such as building and testing your changes; check " +
+		"your own changes that way instead of asking the user to. The user approves every " +
+		"change and every command."
 
 	projectFile         = "TRUBO.md" // project instructions, read from workDir at startup
 	maxProjectFileBytes = 50 * 1024
