@@ -25,6 +25,42 @@ var tools = []anthropic.ToolUnionParam{
 			},
 		},
 	}},
+	{OfTool: &anthropic.ToolParam{
+		Name: "read_file",
+		Description: anthropic.String("Read a text file in the project. Each line of the output starts " +
+			"with its line number and a tab; those numbers are not part of the file. Long files are " +
+			"cut off with a note saying so; use offset and limit to read the rest."),
+		InputSchema: anthropic.ToolInputSchemaParam{
+			Properties: map[string]any{
+				"path": map[string]any{
+					"type":        "string",
+					"description": "File path, relative to the project root.",
+				},
+				"offset": map[string]any{
+					"type":        "integer",
+					"description": "Line number to start reading from (1-based). Defaults to 1.",
+				},
+				"limit": map[string]any{
+					"type":        "integer",
+					"description": "Maximum number of lines to return. Defaults to 2000, which is also the maximum.",
+				},
+			},
+			Required: []string{"path"},
+		},
+	}},
+	{OfTool: &anthropic.ToolParam{
+		Name: "list_files",
+		Description: anthropic.String("List files in the project recursively, as paths relative to " +
+			"the project root. Skips .git. Use this to find files before reading them."),
+		InputSchema: anthropic.ToolInputSchemaParam{
+			Properties: map[string]any{
+				"path": map[string]any{
+					"type":        "string",
+					"description": "Directory to list, relative to the project root. Omit for the whole project.",
+				},
+			},
+		},
+	}},
 }
 
 // dispatch runs the tool the model asked for. A tool request is just data:
@@ -34,6 +70,10 @@ func dispatch(name string, input json.RawMessage) (string, error) {
 	switch name {
 	case "get_current_time":
 		return getCurrentTime(input)
+	case "read_file":
+		return readFile(input)
+	case "list_files":
+		return listFiles(input)
 	default:
 		return "", fmt.Errorf("unknown tool %q", name)
 	}

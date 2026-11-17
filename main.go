@@ -15,14 +15,29 @@ const (
 	model          = "claude-opus-5-5"
 	maxTokens      = 16000
 	requestTimeout = 5 * time.Minute
-	systemPrompt   = "You are trubo, a coding assistant running in a terminal. Be concise."
+	basePrompt     = "You are trubo, a coding assistant running in a terminal. Be concise."
 )
+
+// systemPrompt tells the model where it is. It's built at request time
+// because workDir isn't known until main runs.
+func systemPrompt() string {
+	return basePrompt + "\n\nWorking directory: " + workDir +
+		"\nThis directory contains trubo's own source code (Go). Use list_files and read_file " +
+		"to look at the code instead of guessing."
+}
 
 func main() {
 	if os.Getenv("ANTHROPIC_API_KEY") == "" {
 		fmt.Fprintln(os.Stderr, "ANTHROPIC_API_KEY is not set")
 		os.Exit(1)
 	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Getting working directory:", err)
+		os.Exit(1)
+	}
+	workDir = wd
 
 	client := anthropic.NewClient()
 	scanner := bufio.NewScanner(os.Stdin)
@@ -115,7 +130,7 @@ func ask(client anthropic.Client, history []anthropic.MessageParam) (*anthropic.
 	return client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     model,
 		MaxTokens: maxTokens,
-		System:    []anthropic.TextBlockParam{{Text: systemPrompt}},
+		System:    []anthropic.TextBlockParam{{Text: systemPrompt()}},
 		Messages:  history,
 		Tools:     tools,
 	})
