@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"time"
@@ -91,26 +92,63 @@ func main() {
 	systemPrompt = buildSystemPrompt(notes)
 
 	client := anthropic.NewClient()
-	scanner := bufio.NewScanner(os.Stdin)
 
-	// confirm reads the answer from the same scanner as the prompt loop. A
-	// second reader on stdin would miss input this scanner already buffered.
-	confirm := func(question string) bool {
-		fmt.Print(question + " [y/N] ")
-		if !scanner.Scan() {
-			return false
+	// Ctrl-C cancels the current turn (or prints a hint at the prompt)
+	// instead of killing trubo.
+	interrupts := make(chan os.Signal, 1)
+	signal.Notify(interrupts, os.Interrupt)
+
+	// One goroutine owns stdin and sends each line on lines, closing it at
+	// EOF. A blocked Scan can't be interrupted, so the prompt loop and confirm
+	// select on this channel instead; a second reader would also miss input
+	// the scanner already buffered. readErr is set before lines is closed.
+	lines := make(chan string)
+	var readErr error
+	go func() {
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			lines <- scanner.Text()
 		}
-		answer := strings.ToLower(strings.TrimSpace(scanner.Text()))
-		return answer == "y" || answer == "yes"
+		readErr = scanner.Err()
+		close(lines)
+	}()
+
+	confirm := func(ctx context.Context, question string) bool {
+		fmt.Print(question + " [y/N] ")
+		select {
+		case <-ctx.Done():
+			fmt.Println()
+			return false
+		case line, ok := <-lines:
+			if !ok {
+				return false
+			}
+			answer := strings.ToLower(strings.TrimSpace(line))
+			return answer == "y" || answer == "yes"
+		}
 	}
 
 	// The whole conversation. Since the model has no memory of its own, every
 	// request sends this entire list, and we append to it after each turn.
 	var history []anthropic.MessageParam
 
-	fmt.Print("> ")
-	for scanner.Scan() {
-		input := strings.TrimSpace(scanner.Text())
+	for {
+		fmt.Print("> ")
+		var input string
+		select {
+		case <-interrupts:
+			fmt.Println("\n(type /exit or press Ctrl-D to quit)")
+			continue
+		case line, ok := <-lines:
+			if !ok {
+				if readErr != nil {
+					fmt.Fprintln(os.Stderr, "Reading input:", readErr)
+					os.Exit(1)
+				}
+				return
+			}
+			input = strings.TrimSpace(line)
+		}
 
 		switch input {
 		case "/exit":
@@ -118,20 +156,37 @@ func main() {
 		case "/clear":
 			history = nil
 			fmt.Println("(conversation cleared)")
-			fmt.Print("> ")
 			continue
 		case "":
-			fmt.Print("> ")
 			continue
 		}
 
 		turnStart := len(history)
 		history = append(history, anthropic.NewUserMessage(anthropic.NewTextBlock(input)))
 
+		// While the turn runs, Ctrl-C cancels its context.
+		ctx, cancel := context.WithCancel(context.Background())
+		turnDone := make(chan struct{})
+		go func() {
+			select {
+			case <-interrupts:
+				cancel()
+			case <-turnDone:
+			}
+		}()
+
 		var err error
-		history, err = runTurn(client, history, confirm)
+		history, err = runTurn(ctx, client, history, confirm)
+		close(turnDone)
+		cancel()
+
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "Turn stopped:", err)
+			interrupted := errors.Is(err, context.Canceled)
+			if interrupted {
+				fmt.Println("(interrupted)")
+			} else {
+				fmt.Fprintln(os.Stderr, "Turn stopped:", err)
+			}
 			if len(history) == turnStart+1 {
 				// Nothing ran, so forget the message and let the user retry.
 				history = history[:turnStart]
@@ -140,29 +195,30 @@ func main() {
 				// real, so keep the record of them. History ends with tool
 				// results here; close the turn so user and assistant messages
 				// still alternate.
-				history = append(history, anthropic.NewAssistantMessage(anthropic.NewTextBlock(
-					fmt.Sprintf("(This turn was interrupted: %v. The tool calls above were carried out.)", err))))
+				note := fmt.Sprintf("(This turn was interrupted: %v. The tool calls above were carried out.)", err)
+				if interrupted {
+					note = "(The user interrupted this turn. The tool results above show which tool calls were carried out.)"
+				}
+				history = append(history, anthropic.NewAssistantMessage(anthropic.NewTextBlock(note)))
 			}
 		}
-		fmt.Print("> ")
-	}
-
-	if err := scanner.Err(); err != nil {
-		fmt.Fprintln(os.Stderr, "Reading input:", err)
-		os.Exit(1)
 	}
 }
 
 // runTurn sends the conversation, runs any tools the model asks for, and
-// repeats until the model replies without asking for a tool.
-func runTurn(client anthropic.Client, history []anthropic.MessageParam, confirm confirmFunc) ([]anthropic.MessageParam, error) {
+// repeats until the model replies without asking for a tool. If ctx is
+// cancelled, it returns ctx.Err() with history still valid to send again.
+func runTurn(ctx context.Context, client anthropic.Client, history []anthropic.MessageParam, confirm confirmFunc) ([]anthropic.MessageParam, error) {
 	for round := 1; ; round++ {
 		if round > maxToolRounds {
 			return history, fmt.Errorf("stopped after %d rounds of tool calls", maxToolRounds)
 		}
 
-		resp, err := ask(client, history)
+		resp, err := ask(ctx, client, history)
 		if err != nil {
+			if ctx.Err() != nil {
+				return history, ctx.Err()
+			}
 			return history, err
 		}
 		if resp.StopReason == anthropic.StopReasonRefusal {
@@ -187,8 +243,15 @@ func runTurn(client anthropic.Client, history []anthropic.MessageParam, confirm 
 				continue
 			}
 
+			// After an interrupt, still answer every tool_use, without running it.
+			if ctx.Err() != nil {
+				results = append(results, anthropic.NewToolResultBlock(use.ID,
+					"This tool call was not run because the user interrupted the turn.", true))
+				continue
+			}
+
 			fmt.Printf("[tool] %s %s\n", use.Name, truncate(string(use.Input), 200))
-			output, err := dispatch(use.Name, use.Input, confirm)
+			output, err := dispatch(ctx, use.Name, use.Input, confirm)
 			if err != nil {
 				fmt.Printf("[tool] error: %v\n", err)
 				results = append(results, anthropic.NewToolResultBlock(use.ID, err.Error(), true))
@@ -200,6 +263,9 @@ func runTurn(client anthropic.Client, history []anthropic.MessageParam, confirm 
 			return history, nil
 		}
 		history = append(history, anthropic.NewUserMessage(results...))
+		if ctx.Err() != nil {
+			return history, ctx.Err()
+		}
 	}
 }
 
@@ -213,8 +279,8 @@ func truncate(s string, n int) string {
 }
 
 // ask sends the full conversation to the model and returns its response.
-func ask(client anthropic.Client, history []anthropic.MessageParam) (*anthropic.Message, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+func ask(ctx context.Context, client anthropic.Client, history []anthropic.MessageParam) (*anthropic.Message, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 
 	return client.Messages.New(ctx, anthropic.MessageNewParams{

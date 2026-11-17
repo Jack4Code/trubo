@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -16,8 +17,9 @@ const (
 	maxPreviewLines = 40 // per side; longer changes are cut in the preview only
 )
 
-// confirmFunc asks the user a yes/no question and reports whether they said yes.
-type confirmFunc func(question string) bool
+// confirmFunc asks the user a yes/no question and reports whether they said
+// yes. It returns false if ctx is cancelled while waiting for the answer.
+type confirmFunc func(ctx context.Context, question string) bool
 
 // readHashes records each file's content as of the model's last read_file (or
 // its own last write). Writes compare against it, so the model can't change a
@@ -35,7 +37,7 @@ func checkSeen(path, display string, current []byte) error {
 	return nil
 }
 
-func editFile(input json.RawMessage, confirm confirmFunc) (string, error) {
+func editFile(ctx context.Context, input json.RawMessage, confirm confirmFunc) (string, error) {
 	var args struct {
 		Path      string `json:"path"`
 		OldString string `json:"old_string"`
@@ -81,13 +83,13 @@ func editFile(input json.RawMessage, confirm confirmFunc) (string, error) {
 	}
 	updated := strings.Replace(content, args.OldString, args.NewString, 1)
 
-	if err := applyChange(path, "Edit "+args.Path, content, updated, info.Mode().Perm(), confirm); err != nil {
+	if err := applyChange(ctx, path, "Edit "+args.Path, content, updated, info.Mode().Perm(), confirm); err != nil {
 		return "", err
 	}
 	return "Edited " + args.Path, nil
 }
 
-func writeFile(input json.RawMessage, confirm confirmFunc) (string, error) {
+func writeFile(ctx context.Context, input json.RawMessage, confirm confirmFunc) (string, error) {
 	var args struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
@@ -131,7 +133,7 @@ func writeFile(input json.RawMessage, confirm confirmFunc) (string, error) {
 	if exists {
 		header, verb = "Overwrite "+args.Path, "Overwrote"
 	}
-	if err := applyChange(path, header, old, args.Content, perm, confirm); err != nil {
+	if err := applyChange(ctx, path, header, old, args.Content, perm, confirm); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("%s %s (%d lines)", verb, args.Path, len(splitLines(args.Content))), nil
@@ -140,9 +142,9 @@ func writeFile(input json.RawMessage, confirm confirmFunc) (string, error) {
 // applyChange shows the user what's about to change, asks for approval, and
 // writes the file. Declining is reported to the model as an error so it knows
 // nothing happened.
-func applyChange(path, header, oldText, newText string, perm fs.FileMode, confirm confirmFunc) error {
+func applyChange(ctx context.Context, path, header, oldText, newText string, perm fs.FileMode, confirm confirmFunc) error {
 	fmt.Printf("\n%s\n%s", header, changePreview(oldText, newText))
-	if !confirm("Apply this change?") {
+	if !confirm(ctx, "Apply this change?") {
 		return errors.New("the user declined this change, so the file was not modified. " +
 			"Ask them what they want instead of retrying the same change")
 	}

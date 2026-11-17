@@ -20,7 +20,9 @@ const (
 	bashWaitDelay = 5 * time.Second
 )
 
-func runBash(input json.RawMessage, confirm confirmFunc) (string, error) {
+// runBash runs a command after the user approves it. Cancelling turnCtx (the
+// user pressing Ctrl-C) kills the command's process group, like the timeout.
+func runBash(turnCtx context.Context, input json.RawMessage, confirm confirmFunc) (string, error) {
 	var args struct {
 		Command        string `json:"command"`
 		TimeoutSeconds *int   `json:"timeout_seconds"`
@@ -40,12 +42,12 @@ func runBash(input json.RawMessage, confirm confirmFunc) (string, error) {
 	}
 
 	fmt.Printf("\nRun in %s:\n  %s\n", workDir, args.Command)
-	if !confirm("Run this command?") {
+	if !confirm(turnCtx, "Run this command?") {
 		return "", errors.New("the user declined to run this command, so nothing was run. " +
 			"Ask them what they want instead of retrying the same command")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+	ctx, cancel := context.WithTimeout(turnCtx, time.Duration(timeout)*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "bash", "-c", args.Command)
@@ -79,6 +81,9 @@ func runBash(input json.RawMessage, confirm confirmFunc) (string, error) {
 	}
 	var exitErr *exec.ExitError
 	switch {
+	// Check the turn first: cancelling it also cancels ctx.
+	case err != nil && turnCtx.Err() != nil:
+		return "", fmt.Errorf("%s\n(interrupted by the user; the command was killed)", output)
 	case err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded):
 		return "", fmt.Errorf("%s\n(timed out after %ds; the command was killed)", output, timeout)
 	case errors.Is(err, exec.ErrWaitDelay):

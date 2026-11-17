@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -135,7 +136,7 @@ var tools = []anthropic.ToolUnionParam{
 // nothing happens unless this function decides to do it. Errors are returned
 // to the model as tool results, not treated as fatal. Tools that change
 // anything ask the user through confirm first.
-func dispatch(name string, input json.RawMessage, confirm confirmFunc) (string, error) {
+func dispatch(ctx context.Context, name string, input json.RawMessage, confirm confirmFunc) (string, error) {
 	switch name {
 	case "get_current_time":
 		return getCurrentTime(input)
@@ -144,11 +145,11 @@ func dispatch(name string, input json.RawMessage, confirm confirmFunc) (string, 
 	case "list_files":
 		return listFiles(input)
 	case "edit_file":
-		return editFile(input, confirm)
+		return editFile(ctx, input, confirm)
 	case "write_file":
-		return writeFile(input, confirm)
+		return writeFile(ctx, input, confirm)
 	case "bash":
-		return runBash(input, confirm)
+		return runBash(ctx, input, confirm)
 	default:
 		return "", fmt.Errorf("unknown tool %q", name)
 	}
