@@ -61,12 +61,58 @@ var tools = []anthropic.ToolUnionParam{
 			},
 		},
 	}},
+	{OfTool: &anthropic.ToolParam{
+		Name: "edit_file",
+		Description: anthropic.String("Replace one exact occurrence of old_string with new_string in " +
+			"an existing file. Read the file with read_file first. old_string must match the file " +
+			"exactly, including whitespace and indentation, and must appear exactly once; include " +
+			"enough surrounding lines to make it unique. Do not include read_file's line-number " +
+			"prefixes. The user sees the change and must approve it before it is written."),
+		InputSchema: anthropic.ToolInputSchemaParam{
+			Properties: map[string]any{
+				"path": map[string]any{
+					"type":        "string",
+					"description": "File path, relative to the project root.",
+				},
+				"old_string": map[string]any{
+					"type":        "string",
+					"description": "The exact text to replace. Must appear exactly once in the file.",
+				},
+				"new_string": map[string]any{
+					"type":        "string",
+					"description": "The text to put in its place.",
+				},
+			},
+			Required: []string{"path", "old_string", "new_string"},
+		},
+	}},
+	{OfTool: &anthropic.ToolParam{
+		Name: "write_file",
+		Description: anthropic.String("Create a new file, or replace the entire content of an existing " +
+			"one. Prefer edit_file for changing part of a file. Overwriting an existing file requires " +
+			"reading it with read_file first. Missing parent directories are created. The user sees " +
+			"the change and must approve it before it is written."),
+		InputSchema: anthropic.ToolInputSchemaParam{
+			Properties: map[string]any{
+				"path": map[string]any{
+					"type":        "string",
+					"description": "File path, relative to the project root.",
+				},
+				"content": map[string]any{
+					"type":        "string",
+					"description": "The complete content of the file.",
+				},
+			},
+			Required: []string{"path", "content"},
+		},
+	}},
 }
 
 // dispatch runs the tool the model asked for. A tool request is just data:
 // nothing happens unless this function decides to do it. Errors are returned
-// to the model as tool results, not treated as fatal.
-func dispatch(name string, input json.RawMessage) (string, error) {
+// to the model as tool results, not treated as fatal. Tools that change
+// anything ask the user through confirm first.
+func dispatch(name string, input json.RawMessage, confirm confirmFunc) (string, error) {
 	switch name {
 	case "get_current_time":
 		return getCurrentTime(input)
@@ -74,6 +120,10 @@ func dispatch(name string, input json.RawMessage) (string, error) {
 		return readFile(input)
 	case "list_files":
 		return listFiles(input)
+	case "edit_file":
+		return editFile(input, confirm)
+	case "write_file":
+		return writeFile(input, confirm)
 	default:
 		return "", fmt.Errorf("unknown tool %q", name)
 	}

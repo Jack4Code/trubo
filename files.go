@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -27,9 +29,10 @@ var skipDirs = map[string]bool{
 // inside it.
 var workDir string
 
-// resolvePath turns a path from the model into an absolute path and rejects
-// anything outside workDir. It does not follow symlinks, so a symlink inside
-// the project that points outside it would still get through.
+// resolvePath turns a path from the model into an absolute path inside
+// workDir with symlinks resolved, and rejects anything that ends up outside
+// it. A path that doesn't exist yet (a file about to be created) is checked
+// through its nearest existing parent directory.
 func resolvePath(p string) (string, error) {
 	if p == "" {
 		p = "."
@@ -39,12 +42,60 @@ func resolvePath(p string) (string, error) {
 		abs = filepath.Join(workDir, abs)
 	}
 	abs = filepath.Clean(abs)
-
-	rel, err := filepath.Rel(workDir, abs)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if !insideWorkDir(abs) {
 		return "", fmt.Errorf("path %q is outside the project", p)
 	}
-	return abs, nil
+
+	real, err := resolveSymlinks(abs)
+	if err != nil {
+		return "", err
+	}
+	if !insideWorkDir(real) {
+		return "", fmt.Errorf("path %q points outside the project through a symlink", p)
+	}
+	return real, nil
+}
+
+func insideWorkDir(abs string) bool {
+	rel, err := filepath.Rel(workDir, abs)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// resolveSymlinks is filepath.EvalSymlinks for paths whose last parts may not
+// exist yet: it resolves the longest existing prefix and appends the rest.
+func resolveSymlinks(abs string) (string, error) {
+	missing := ""
+	cur := abs
+	for {
+		real, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			return filepath.Join(real, missing), nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		if _, lerr := os.Lstat(cur); lerr == nil {
+			// cur exists but can't be resolved, so it's a symlink to something
+			// missing. Writing through it would create its target, wherever
+			// that is.
+			return "", fmt.Errorf("%s is a broken symlink", cur)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return abs, nil
+		}
+		missing = filepath.Join(filepath.Base(cur), missing)
+		cur = parent
+	}
+}
+
+// splitLines splits text into lines. A trailing newline ends the last line
+// rather than starting an empty one.
+func splitLines(text string) []string {
+	if text == "" {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(text, "\n"), "\n")
 }
 
 func readFile(input json.RawMessage) (string, error) {
@@ -68,6 +119,7 @@ func readFile(input json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	readHashes[path] = sha256.Sum256(data) // lets edit_file and write_file check for changes
 	if bytes.IndexByte(data[:min(len(data), 8000)], 0) >= 0 {
 		return "", fmt.Errorf("%s looks like a binary file", args.Path)
 	}
@@ -75,10 +127,7 @@ func readFile(input json.RawMessage) (string, error) {
 		return "(empty file)", nil
 	}
 
-	lines := strings.Split(string(data), "\n")
-	if lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1] // trailing newline, not extra line
-	}
+	lines := splitLines(string(data))
 
 	offset := max(args.Offset, 1)
 	limit := args.Limit
