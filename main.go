@@ -48,15 +48,14 @@ func main() {
 			continue
 		}
 
+		turnStart := len(history)
 		history = append(history, anthropic.NewUserMessage(anthropic.NewTextBlock(input)))
 
-		resp, err := ask(client, history)
+		var err error
+		history, err = runTurn(client, history)
 		if err != nil {
-			history = history[:len(history)-1]
+			history = history[:turnStart]
 			fmt.Fprintln(os.Stderr, "Request failed:", err)
-		} else {
-			history = append(history, resp.ToParam())
-			fmt.Println("trubo:", replyText(resp))
 		}
 		fmt.Print("> ")
 	}
@@ -64,6 +63,47 @@ func main() {
 	if err := scanner.Err(); err != nil {
 		fmt.Fprintln(os.Stderr, "Reading input:", err)
 		os.Exit(1)
+	}
+}
+
+func runTurn(client anthropic.Client, history []anthropic.MessageParam) ([]anthropic.MessageParam, error) {
+	for {
+		resp, err := ask(client, history)
+		if err != nil {
+			return history, err
+		}
+		if resp.StopReason == anthropic.StopReasonRefusal {
+			return history, fmt.Errorf("model declined to respond")
+		}
+
+		// Store the full response (thinking and tool_use blocks included).
+		history = append(history, resp.ToParam())
+
+		if text := replyText(resp); text != "" {
+			fmt.Println("trubo:", text)
+		}
+
+		if resp.StopReason != anthropic.StopReasonToolUse {
+			return history, nil
+		}
+
+		var results []anthropic.ContentBlockParamUnion
+		for _, block := range resp.Content {
+			use, ok := block.AsAny().(anthropic.ToolUseBlock)
+			if !ok {
+				continue
+			}
+
+			fmt.Printf("[tool] %s %s\n", use.Name, use.Input)
+			output, err := dispatch(use.Name, use.Input)
+			if err != nil {
+				fmt.Printf("[tool] error: %v\n", err)
+				results = append(results, anthropic.NewToolResultBlock(use.ID, err.Error(), true))
+				continue
+			}
+			results = append(results, anthropic.NewToolResultBlock(use.ID, output, false))
+		}
+		history = append(history, anthropic.NewUserMessage(results...))
 	}
 }
 
@@ -77,6 +117,7 @@ func ask(client anthropic.Client, history []anthropic.MessageParam) (*anthropic.
 		MaxTokens: maxTokens,
 		System:    []anthropic.TextBlockParam{{Text: systemPrompt}},
 		Messages:  history,
+		Tools:     tools,
 	})
 }
 
